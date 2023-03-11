@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Restart docker desktop
+
+launchctl stop `launchctl list|grep docker.docker | grep -v "-" | cut -f3`
+
+open --background -a Docker
+sleep 20
+
+while ! docker system info > /dev/null 2>&1; do sleep 1; done
+
+#say docker is ready

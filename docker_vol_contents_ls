@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+
+if [[ $# < 1 ]]; then
+   docker volume ls
+   echo -e "\nNeed volume_name (valid one from above list)\n"
+   exit -1
+fi
+
+docker run --rm -i -v=$1:/tmp/myvolume busybox find /tmp/myvolume

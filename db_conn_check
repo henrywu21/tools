@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+
+db_host=??
+
+mysql --connect-timeout=5 --host=$db_host 2>.msg_$$
+msg=`cat .msg_$$`
+
+if [[ $msg =~ "ERROR 2003" ]]; then
+    echo "Not on VPN? BAD connection to DB server [$db_host]"
+    cat ".msg_$$"
+elif [[ $msg =~ "ERROR 2013" ]]; then
+    echo "Unknown condition?! BAD connection to DB server [$db_host]"
+    cat ".msg_$$"
+else
+    echo "GOOD connection to DB server [$db_host]"
+fi
+
+rm ".msg_$$"
+

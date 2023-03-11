@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+
+#docker stats `docker ps -q`
+
+# docker stats --format "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}"
+# https://docs.docker.com/engine/reference/commandline/stats/
+
+threshold=0.5
+cmd_name='docker stats --no-stream --format "{{.Name}}"'
+
+get_cpu_perc() {
+    cmd='docker stats --no-stream --format "{{.CPUPerc}}"'
+    _cpu_perc=`eval $cmd`
+    _cpu_perc=${_cpu_perc%?}
+
+    echo "$_cpu_perc"
+}
+
+get_mem_usage() {
+    cmd='docker stats --no-stream --format "{{.MemUsage}}"'
+    _mem=`eval $cmd|cut -f1 -d" "`
+
+    echo "$_mem"
+}
+
+cpu_perc=`get_cpu_perc`
+mem=`get_mem_usage`
+
+limit=3
+retry=$limit
+while [[ $cpu_perc > $threshold || $retry > 0 ]]; do
+    echo -n "$cpu_perc%;$mem "
+
+    if [[ $cpu_perc < $threshold ]]; then
+	echo -n "($retry)"
+	((retry--))
+    else
+        retry=$limit
+    fi
+
+    sleep 3
+    cpu_perc=`get_cpu_perc`
+    mem=`get_mem_usage`
+done
+
+echo -e "\nDocker hung now?! (cpu_perc $cpu_pct <= $threshold) (`eval $cmd_name`)"
+echo -e "\x07\x07"

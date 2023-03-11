@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+
+# gcloud logging read by project, and optional container && message filters
+# Henry Wu 04/2021
+
+usage="Usage: `basename $0` [-p project_name] [-c 'cms_fpm or cms_nginx'] [-m 'error']\n \
+    \t-p project: project_name \n \
+    \t-c container: [api|cms]_[fpm|nginx], crons; support And/Or w/ ()\n \
+    \t-m message: support AND/oR w/ (), e.g. 'error And cms_4 AND ( video or article )'"
+
+parse_input() {
+    [[ "$1" == "container" ]] && key="jsonPayload.container.name" || key="jsonPayload.message"
+
+    local orig_nocasematch=$(shopt -p nocasematch; true)
+    shopt -s nocasematch
+
+    res=""
+    if [[ ! ("$2" =~ " AND " || "$2" =~ " OR ") ]]; then # if has space, escape needed when call this tool
+        res="$key: \"$2\""
+    else
+        read -r -a array <<< "$2"
+        for element in "${array[@]}"
+        do
+            
+            if [[ $element == "OR" || $element == "AND" ]]; then
+                res+=" ${element^^} "
+            elif [[ $element == "(" || $element == ")" ]]; then
+                res+="${element}"
+            else
+                res+="$key: \"$element\""
+            fi
+        done
+    fi
+
+    $orig_nocasematch
+    
+    echo "AND ($res)"
+}
+
+container='AND (jsonPayload.container.name: "cms_fpm" OR jsonPayload.container.name: "cms_nginx")'
+
+message='AND (jsonPayload.message: "error")'
+
+project='i-cnet-prod'
+limit=5
+while getopts :p:m:c:l:h flag; do
+    case "${flag}" in
+        p) project=${OPTARG} ;;
+	    c) container=`parse_input "container" "${OPTARG}"` ;;
+        m) message=`parse_input "message" "${OPTARG}"` ;;
+	    l) limit=${OPTARG} ;;
+        h) echo -e "$usage"; exit ;;
+    esac
+done
+
+echo -e "Current UTC time: `date -u` \n"
+
+cmd="gcloud logging read"
+cmd="$cmd --project=$project \"resource.type=gce_instance $container $message AND logName=projects/$project/logs/gcplogs-docker-driver\" --format='json(jsonPayload.container.name,jsonPayload.message)' --freshness=1h --limit $limit"
+
+echo -e "==> $cmd\n"
+
+eval $cmd

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+
+target=$1
+
+docker images | grep $target | awk '{ print $3 }' | xargs -I {} docker rmi {}

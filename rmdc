@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+
+target=$1
+
+docker ps -a | grep $target | awk '{print $1 }' | xargs -I {} docker rm {}

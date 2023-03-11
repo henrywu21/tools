@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+
+echo "docker rm..."
+docker rm `docker ps -aq |awk {'print $1'}` 2> /dev/null 

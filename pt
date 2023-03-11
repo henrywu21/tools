@@ -1,0 +1,8 @@
+#!/bin/bash
+
+# process 'top' usage
+proc_name=$1
+
+top -l 1 |head -12|tail -1
+
+top -l 1 | grep "$proc_name" | awk '{print "NAME="$2 "\t%CPU="$3 "\tMEM="$8 "\tCMPRS-MEM="$10}'
