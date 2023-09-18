@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+
+if [ "$1" ]; then
+    echo -ne "\033]0;$*\007"
+else
+    echo -ne "\033]0;${PWD##*/}\007"
+fi
