@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+
+usage="`basename $0` <ref|test|all> config_file filter_str"
+if [[ $# < 3 ]]; then
+	echo $usage
+	exit -1
+fi
+
+step=$1
+config=$2
+filter=$3
+
+sleep_long=20
+
+if [[ "$step" = 'ref' || "$step" = 'all' ]]; then
+	echo "Creating reference..."
+	sudo docker run --rm -d -v $(pwd):/src backstopjs/backstopjs reference --config=$config --filter=$filter
+fi
+
+if [[ "$step" = 'test' || "$step" = 'all' ]]; then
+	echo "Testing against reference..."
+	sudo docker run --rm -d -v $(pwd):/src backstopjs/backstopjs test --config=$config --filter=$filter
+
+	echo "Waiting $sleep_long seconds for report to be ready..."
+	sleep $sleep_long
+	echo "Opening report..."
+
+	backstop openReport --config=$config
+fi

@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+
+iron_test_home=~/git/iron_test
+
+if [[ $# < 1 ]]; then
+	echo "`basename $0` st [-v]|cnet|tr|tvg"
+	echo -e "\tst: branches status - it’s on CNET or TechRepublic, TVG branches
+	st -v: verbose branches info for all repos
+	cnet: switch to CNET branches
+	tvg: switch to TVGUIDE branches
+	tr: switch to TechRepublic branches\n"
+
+	echo "Attention: update script $0 for any branches changes!"
+	exit 0
+fi
+
+if [ "$1" = 'st' ]; then
+
+	if [[ "$2" = '-v' ]]; then
+		echo -e "\n==== iron_test_home: $iron_test_home ===="
+		echo -e '\n===> iron_test status:'
+		cd $iron_test_home; git status
+
+		echo -e '\n===> hub status:'
+		cd $iron_test_home/vendor/hub; git status
+
+		echo -e '\n===> hub_cnet status:'
+		cd $iron_test_home/vendor/hub_cnet; git status
+
+		echo -e '\n===> hub_tr status:'
+		cd $iron_test_home/vendor/hub_techrepublic; git status
+
+		echo -e '\n===> hub_tvguide status:'
+                cd $iron_test_home/vendor/hub_tvguide; git status
+	else
+		isCNET=$(cd $iron_test_home/vendor/hub; git status | grep cnet)
+		isTR=$(cd $iron_test_home/vendor/hub; git status | grep tech)
+		isTVG=$(cd $iron_test_home/vendor/hub; git status | grep tvg)
+		if [ "$isCNET" != "" ]; then
+			echo "$iron_test_home: cnet branches"
+		elif [ "$isTR" != "" ]; then
+			echo "$iron_test_home: techrepublic branches"
+		elif [ "$isTVG" != "" ]; then
+                        echo "$iron_test_home: tvguide branches"
+		fi
+	fi
+
+elif [ "$1" = 'tvg' ]; then
+        echo 'Switch to tvguide...'
+
+        cd $iron_test_home; git checkout master
+        cd $iron_test_home/vendor/hub; git checkout tvguide-master-3.3.0
+        cd $iron_test_home/vendor/hub_tvguide; git checkout task/cmgtest-281
+	cd $iron_test_home/vendor/prism_users; git checkout task/cmgtest-281
+elif [ "$1" = 'cnet' ]; then
+	echo 'Switch to cnet...'
+
+	cd $iron_test_home; git checkout 3.3.0
+	cd $iron_test_home/vendor/hub; git checkout cnet-master-3.3.0
+	cd $iron_test_home/vendor/hub_cnet; git checkout cnet-master-3.3.0
+
+elif [ "$1" == 'tr' ]; then
+	echo 'Switch to techrepublic...'
+
+	cd $iron_test_home; git checkout tags/2.1.2
+        cd $iron_test_home/vendor/hub; git checkout mods_for_hub_techrepublic
+	cd $iron_test_home/vendor/hub_techrepublic; git checkout techrepublic-master
+	cd $iron_test_home/vendor/prism_users; git checkout task/cmgtest-43
+fi

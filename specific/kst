@@ -1,0 +1,380 @@
+#! /usr/bin/env python3
+
+import argparse
+import getpass
+import json
+import os
+import re
+import sys
+from collections import defaultdict
+from pathlib import Path
+
+import requests
+
+kst_home = '.'
+is_show_kst_code = False
+is_run_failed_keyword = False
+is_run_failed_keyword_url = False
+
+kst_jenkins_job_url = 'https://jenkins.cnet.com/job/CBSi-Tech/job/smoketests'
+password = None
+
+tag_orig_log_line = '##'
+retry_cnt = 2
+
+failure_msg_dict = defaultdict(list)
+failed_set = set()
+
+# sentry issues
+is_check_sentry = False
+top_n = 100
+# Auth Tokens: created at https://sentry.io/settings/account/api/auth-tokens/
+sentry_api_token = '067e11ff938242c88e664e9dfa961f397e13ceb1adbe4672b2c28995db49d437'
+issue_cnt_dict = {}
+issue_issue_dict = {}
+issue_link_dict = {}
+
+
+def _jenkins_req(url: str) -> str:
+    user = getpass.getuser()
+    global password
+    if password is None:
+        password = getpass.getpass("Password of Jenkins user:{0}\n".format(user)) if password is None else password
+    return requests.get(url, auth=(user, password)).text
+
+
+def _get_latest_failed_builds():
+    _build_time_dict = {}
+    _build_num_dict = {}
+
+    res = _jenkins_req(kst_jenkins_job_url)
+
+    last_failed_builds = re.findall(
+        '\\s*([\\d+ [a-z]+|\\d+ [a-z]+ \\d+ [a-z]+])\\s*- <a href="job/([a-z].*)-keywordtests/lastFailedBuild/.*#(\\d+)',
+        res)
+
+    for build in last_failed_builds:
+        _brand = build[1]
+
+        _raw_time_period = build[0]  # 4 days 14 hr; 1 day 1 hr; 12 hr; 13 min
+        time_period_hr = 0
+        re_time_period = re.search('^((\\d+) (day|days) )?(\\d+) hr$', _raw_time_period)
+        if re_time_period is None:
+            time_period_hr = 0.5  # all in 1 hour build
+        else:
+            day = 0 if re_time_period[2] is None else int(re_time_period[2])
+            time_period_hr = time_period_hr + day * 24 + int(re_time_period[4])
+
+        _build_time_dict[_brand] = time_period_hr
+
+        _build_num_dict[_brand] = build[2]
+
+    return _build_num_dict, _build_time_dict
+
+
+def get_failed_brands_builds(arg: str) -> dict:
+    _target_build_num_dict = {}
+
+    if re.search('^(cnet|techrepublic|zdnet|chowhound|tvg|metacritic|download)-\\d+$', arg):
+        # has exact brand & build#
+        _target_build_num_dict[arg.split('-')[0]] = arg.split('-')[1]
+    else:
+        # case #1: brand != all only --> brand's latest failure within 24hrs
+        # case #2: brand != all w/ x hr --> brand's latest failure within x hrs
+        # case #3: brand == all only --> all brands' latest failure within 24hrs
+        # case #4: brand == all w/ x hr --> all brands' latest failure within x hrs
+        _build_num_dict, _build_time_dict = _get_latest_failed_builds()
+
+        if '-' in arg:
+            _brand = arg.split('-')[0]
+            _time_period = int(arg.split('-')[1].rstrip('hr'))
+        else:
+            _brand = arg
+            _time_period = 24  # default to 24hrs
+
+        # filter out invalid brand, keep all if brand == all
+        _tmp_dict = {}
+        if _brand != 'all':
+            try:
+                _tmp_dict[_brand] = _build_num_dict[_brand]
+            except KeyError:
+                print('No failed build find for [{0}]'.format(_brand))
+                exit(0)
+        else:
+            _tmp_dict = _build_num_dict
+
+        # filter out invalid brand by time period
+        for _brand in _tmp_dict.keys():
+            if _build_time_dict[_brand] <= _time_period:
+                _target_build_num_dict[_brand] = _tmp_dict[_brand]
+
+    return _target_build_num_dict
+
+
+def get_kst_log(_brand, _build_num):
+    url = '{0}/job/{1}-keywordtests/{2}/consoleText'.format(kst_jenkins_job_url, _brand, _build_num)
+    return _jenkins_req(url)
+
+
+def parse_kst_log(contents: str):
+    pattern_retry = 'failed. Retry {0}/{0}...'.format(retry_cnt)
+    pattern_failed = 'failed after {0} retries.'.format(retry_cnt)
+
+    pattern_fail = '\\[ FAIL \\]'
+    pattern_failure = 'Failure >'
+
+    retry_tc = None
+    line_num = 0
+    for line in contents.split('\n'):
+        line_num = line_num + 1
+        re_retry = re.search(pattern_retry, line)
+        re_failed = re.search(pattern_failed, line)
+        re_fail = re.search(pattern_fail, line)
+        re_failure = re.search(pattern_failure, line)
+
+        if re_retry:
+            retry_tc = line.replace(pattern_retry, '').strip().strip('\'').strip('./')
+        elif retry_tc and (re_fail or re_failure):
+            failure_msg_dict[retry_tc].append('{0}{1}{0}{2}'.format(tag_orig_log_line, line_num, line.strip()))
+        elif re_failed:
+            failed_tc = line.replace(pattern_failed, '').strip().strip('\'').strip('./')
+            retry_tc = None
+            failed_set.add(failed_tc)
+
+
+def prt_failed_kst_log_msg(_brand: str):
+    abtestexc = 'ab=-1:-1:exclude' if (_brand == 'zdnet') else 'featureDisable=ab_test'  # matching KST $ABTESTEXC
+
+    keyword_cnt = 1
+    for key in failure_msg_dict.keys():  # only count failed tc after final retry
+        if key in failed_set:
+            print('\n======== #{0} {1}.{2} ========'.format(keyword_cnt, _brand, key))
+            keyword_cnt = keyword_cnt + 1
+
+            cnt = 1
+            prev_orig_log_line_num = 1
+            cur_fail = ''
+            for msg in failure_msg_dict[key]:
+                orig_log_line_num = re.search('{0}(\\d+){0}'.format(tag_orig_log_line), msg).group().strip(
+                    tag_orig_log_line)
+
+                if int(orig_log_line_num) > prev_orig_log_line_num + 1:
+                    print('\n#{0}:'.format(cnt), end='')
+                    cnt = cnt + 1
+                prev_orig_log_line_num = int(orig_log_line_num)
+
+                msg = re.sub('{0}\\d+{0}'.format(tag_orig_log_line), '', msg)
+
+                if re.search('^\\[ FAIL \\]', msg):
+                    print('  {0}'.format(msg))
+                    cur_fail = msg
+                else:  # 'Failure >' url
+                    print('    {0}'.format(msg))
+
+                    if is_run_failed_keyword_url:
+                        if re.search(abtestexc, msg):
+                            url_failed = re.search('.*Failure > (.*)[?|&]{0}'.format(abtestexc), msg)[1]
+                        else:  # for api
+                            url_failed = re.search('.*Failure > (.*)', msg)[1]
+                        url_failed = re.search('https?://.*.com/(.*)', url_failed)[1]
+
+                        print('\nRe-Run failed keyword {0} [{1}] @url_pattern [{2}]\n'.format(_brand, key, url_failed))
+                        os.system('cd {0}/{1}/bin; ./{2} -l {3}'.format(kst_home, _brand, key, url_failed))
+                    
+                    if is_check_sentry:
+                        is_top_sentry_issue(cur_fail.replace('[ FAIL ]', '[FAIL]') + msg.replace('Failure >', ' -'))
+
+            if is_show_kst_code:
+                print(get_kst_code(_brand, key))
+
+
+def get_kst_code(_brand: str, kst_key: str) -> str:
+    kst_code_path = '{0}/{1}/bin/{2}'.format(kst_home, _brand, kst_key)
+    kst_urls_path = '{0}/{1}/urls'.format(kst_home, _brand)
+
+    flag_in_helper = '^# conditional assertion'
+    flag_begin = 'asserts_array=\\$\\(cat<<SmokeAssertContainer'
+
+    code = '\n-------------\n>>'
+    code = code + '  KST code ({0}):\n'.format(kst_code_path)
+    begin = False
+    url_file = ''
+    with open(kst_code_path) as fp_kst:
+        for line in fp_kst.readlines():
+            re_url_file = re.search('urls_file="(.*)"', line)
+            re_in_helper = re.search(flag_in_helper, line)
+            if re_url_file:
+                url_file = re_url_file[1]
+                continue
+            elif re_in_helper:
+                code = get_kst_code_from_helper('{0}/{1}/bin/{2}'.format(kst_home, _brand, '_chk_keywords_helper'),
+                                                kst_key)
+
+            if begin:
+                code = code + line
+            elif re.search(flag_begin, line):
+                begin = True
+                code = code + line
+
+    code = code + '  >>> urls file: {0}/{1}'.format(kst_urls_path, url_file)
+
+    return code
+
+
+def get_kst_code_from_helper(helper_path, kst_key: str) -> str:
+    code = '\n-------------\n>>'
+    code = code + '  KST code ({0}):\n'.format(helper_path)
+
+    begin = False
+    with open(helper_path) as fp:
+        for line in fp.readlines():
+            re_begin = re.search('if \\[\\[ "\\$script_name" == \'{0}\' \\]\\]; then'.format(kst_key), line)
+            re_end = re.search('elif \\[\\[ "\\$script_name" == ', line)
+            re_end_fi = re.search('^echo "\\${_asserts', line.lstrip())
+            if begin:
+                if re_end or re_end_fi:
+                    break
+                else:
+                    code += line
+            elif re_begin:
+                begin = True
+                code += line
+
+    return code
+
+
+def run_failed_keywords(_brand: str):
+    print('\n\n>>>>>> Re-Run Failed [{0}] Keyword <<<<<<<'.format(_brand))
+
+    keyword_cnt = 1
+    for key in failure_msg_dict.keys():  # only count failed tc after final retry
+        if key in failed_set:
+            print('\n======== #{0} {1}.{2} ========'.format(keyword_cnt, _brand, key))
+            keyword_cnt += 1
+
+            os.system('cd {0}/{1}/bin; ./{2}'.format(kst_home, _brand, key))
+
+
+def parse_brand_build(_brand, _build_num):
+    print()
+    print('=' * 30, _brand, "build#", _build_num, '=' * 30)
+
+    log_file = '{0}-{1}.log'.format(_brand, _build_num)
+
+    if Path(log_file).is_file():
+        print('--> Using saved log file {0}...'.format(log_file))
+        with open(log_file) as fp:
+            log_contents = fp.read()
+    else:
+        print('--> Downloading Jenkins log of {0}: build# {1}...\n'.format(_brand, _build_num))
+        log_contents = get_kst_log(_brand, _build_num)
+        with open(log_file, "w") as fp:
+            fp.write(log_contents)
+            print('\t--> Saved to file {0} for later use'.format(log_file))
+
+    parse_kst_log(log_contents)
+
+    prt_failed_kst_log_msg(_brand)
+
+
+def sentry_api_req(url: str) -> json:
+    headers = {
+        'Authorization': 'Bearer {0}'.format(sentry_api_token),
+        'Content-type': 'application/json',
+    }
+    if not re.search('/$', url):
+        url = url + '/'
+    return requests.get(url, headers=headers).json()
+
+
+def is_top_sentry_issue(search_pattern):
+    sentry_api_url = 'https://sentry.io/api/0/projects'
+    organization_slug = 'cbs-interactive-cmg'
+    project_slug = 'keyword-smoke-tests'
+    sentry_api_issues_url = '{0}/{1}/{2}/issues/'.format(sentry_api_url, organization_slug, project_slug)
+
+    # build issues count and issue dict
+    if len(issue_cnt_dict) == 0 or len(issue_issue_dict) == 0:
+        issues = sentry_api_req(sentry_api_issues_url)
+        for _issue in issues:
+            issue_cnt_dict[_issue['title']] = int(_issue['count'])
+            issue_issue_dict[_issue['title']] = _issue
+
+    search_pattern = search_pattern[:55]  # to match with truncated sentry title
+    found = False
+    _link = None
+
+    if search_pattern in list(issue_link_dict.keys()):
+        _link = issue_link_dict[search_pattern]
+        found = True
+    else:
+        for loop_cnt, (title, cnt) in enumerate(
+                sorted(issue_cnt_dict.items(), key=lambda kv: (kv[1], kv[0]), reverse=True)):
+            if re.search(re.escape(search_pattern), title):
+                found = True
+                _link = issue_issue_dict[title]['permalink'] + ' event_cnt: ' + str(cnt)
+                issue_link_dict[search_pattern] = _link
+                break
+
+            if (loop_cnt + 1) >= top_n:
+                break
+
+    if found:
+        print('\t--> Sentry link: {0}'.format(_link))
+
+
+if __name__ == "__main__":
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--show_code", default=False, action='store_true', help="flag to show KST code or not")
+    ap.add_argument("--rerun_keyword", default=False, action='store_true', help="flag to run failed keyword or not")
+    ap.add_argument("--rerun_keyword_by_url", default=False, action='store_true', help="flag to run failed keyword only against failed url or not")
+    ap.add_argument("--check_sentry", default=False, action='store_true', help="flag to check sentry or not")
+    ap.add_argument('--retry_cnt', type=int, default=2, help="number to match with KST's retry max")
+    ap.add_argument('brand', help="format: <brand>[-<build#>|-<nn>hr] (brand: all, cnet, techrepublic, zdnet, chowhound, tvg, metacritic, download)")
+    args = vars(ap.parse_args())
+
+    if not (re.search('^(cnet|techrepublic|zdnet|chowhound|tvg|metacritic|download)(-\\d+(hr)?)?$', args['brand']) 
+            or re.search('^all(-\\d+hr)?$', args['brand'])):
+        print('\nInvalid argument! Expecting: <brand>[-<build#>|-<nn>hr] ' \
+            '(brand: all, cnet, techrepublic, zdnet, chowhound, tvg, metacritic, download)\n')
+        exit(-1)
+
+    is_show_kst_code = args['show_code']
+    is_run_failed_keyword = args['rerun_keyword']
+    is_run_failed_keyword_url = args['rerun_keyword_by_url']
+    is_check_sentry = args['check_sentry']
+    
+    retry_cnt = args['retry_cnt']
+
+    if is_show_kst_code or is_run_failed_keyword or is_run_failed_keyword_url:
+        if "KST_HOME" in os.environ:
+            kst_home = str(os.environ['KST_HOME']).rstrip('/')
+        else:
+            print('Missing env variable "KST_HOME", set by "export KST_HOME=<kst_home_folder>"\n'
+                '\tNo kst_home_folder? "git clone ssh://git@owl.cbsi.com:7999/cbsit/keywordsmoketest.git"\n')
+            kst_home = '.'
+            print('\nUse current folder . as kst_home!')
+
+    try:
+        password_file = '{0}/bin/.kst_password'.format(Path.home())  # save jenkins's password in file to avoid typing
+        with open(password_file) as fh:
+            password = fh.readline().strip()
+    except FileNotFoundError:
+        password = None
+
+    build_num_dict = get_failed_brands_builds(args['brand'])
+
+    for brand in build_num_dict.keys():
+        failure_msg_dict.clear()
+        failed_set.clear()
+
+        parse_brand_build(brand, build_num_dict[brand])
+
+        if is_run_failed_keyword:
+            run_failed_keywords(brand)
+
+    if is_check_sentry and len(issue_link_dict) > 0:
+        print('\n====> Found issue(s) belongs to Sentry\'s top {0} <====\n'.format(top_n))
+        for idx, (issue, link) in enumerate(issue_link_dict.items()):
+            print('    #{0} [{1}]: \n\t--> {2}'.format(idx + 1, issue, link))
